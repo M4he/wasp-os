@@ -184,6 +184,103 @@ class Draw565(object):
             self._rle2bit(image, x, y, fg, c1, c2)
 
     @micropython.native
+    def blit_from_file(self, fname, x, y):
+        """Decode and draw QOI565 image directly from file
+
+        Uses a custom variant of the "Quite OK Image" (QOI) format trimmed to
+        RGB565. Reads the image directly from file to display in order to
+        circumvent the limited RAM for large images.
+        """
+
+        QOI_OP_INDEX = 0x00  # 00xxxxxx
+        QOI_OP_DIFF =  0x40  # 01xxxxxx
+        QOI_OP_LUMA =  0x80  # 10xxxxxx
+        QOI_OP_RUN =   0xc0  # 11xxxxxx
+        QOI_OP_RGB =   0xfe  # 11111110
+        QOI_MASK_2 =   0xc0  # 11000000
+
+        display = self._display
+
+        with open(fname, 'rb') as image:
+            # header
+            magic = image.read(4)
+            if not 'qoif'.encode() == magic:
+                raise Exception("Not a QOIF image")
+            width = ord(image.read(1)) << 24 | ord(image.read(1)) << 16 \
+                | ord(image.read(1)) << 8 | ord(image.read(1))
+            height = ord(image.read(1)) << 24 | ord(image.read(1)) << 16 \
+                | ord(image.read(1)) << 8 | ord(image.read(1))
+            channels = ord(image.read(1))
+            if channels != 200:
+                print(channels)
+                raise Exception("Unsupported QOIF channels")
+            colorspace = ord(image.read(1))
+            if colorspace != 0:
+                print(colorspace)
+                raise Exception("Unsupported QOIF colorspace")
+            # header end
+
+            display.set_window(x, y, width, height)
+            buf = display.linebuffer[0:2*width]
+
+            index = [0] * 64
+            run = 0
+            num_pxs = 0
+
+            bp = 0
+            px = 0
+            px_r = 0
+            px_g = 0
+            px_b = 0
+
+            display.quick_start()
+            while num_pxs < width*height:
+
+                if run > 0:
+                    run -= 1
+                else:
+                    next_byte = ord(image.read(1))
+                    if next_byte == QOI_OP_RGB:
+                        data = image.read(2)
+                        px_r = data[0] >> 3
+                        px_g = (data[0] << 3 | data[1] >> 5) & 0x3f
+                        px_b = data[1] & 0x1f
+                    elif (next_byte & QOI_MASK_2) == QOI_OP_INDEX:
+                        px = index[next_byte]
+                        px_r = px >> 11
+                        px_g = (px >> 5) & 0x3f
+                        px_b = px & 0x1f
+                    elif (next_byte & QOI_MASK_2) == QOI_OP_DIFF:
+                        px_r = (px_r + ((next_byte >> 4) & 0x03) - 2) % 32
+                        px_g = (px_g + ((next_byte >> 2) & 0x03) - 2) % 64
+                        px_b = (px_b + ( next_byte       & 0x03) - 2) % 32
+                    elif (next_byte & QOI_MASK_2) == QOI_OP_LUMA:
+                        b2 = ord(image.read(1))
+                        vg = (next_byte & 0x3f) - 32
+                        px_r = (px_r + (vg - 8 + ((b2 >> 4) & 0x0f))) % 32
+                        px_g = (px_g +  vg                          ) % 64
+                        px_b = (px_b + (vg - 8 +  (b2       & 0x0f))) % 32
+                    elif (next_byte & QOI_MASK_2) == QOI_OP_RUN:
+                        run = next_byte & 0x3f
+
+                    px = (px_r << 11) | (px_g << 5) | px_b
+                    index_pos = (px_r * 3 + px_g * 5 + px_b * 7) % 64
+                    index[index_pos] = px
+
+                ptr = ptr16(buf)
+                # byte-swap
+                ptr[bp] = (px >> 8) + ((px & 0xff) << 8)
+                num_pxs += 1
+                bp += 1
+                if bp >= width:
+                    display.quick_write(buf)
+                    bp = 0
+
+            display.quick_end()
+
+        image.close()
+
+    @micropython.native
     def rleblit(self, image, pos=(0, 0), fg=0xffff, bg=0):
         """Decode and draw a 1-bit RLE image.
 
