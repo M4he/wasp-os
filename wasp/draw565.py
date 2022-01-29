@@ -202,25 +202,33 @@ class Draw565(object):
         display = self._display
 
         with open(fname, 'rb') as image:
-            # header
+            # QOI file header
+            # magic bytes "qoif"
             magic = image.read(4)
             if not 'qoif'.encode() == magic:
                 raise Exception("Not a QOIF image")
+            # 4 byte width, Big Endian
             width = ord(image.read(1)) << 24 | ord(image.read(1)) << 16 \
                 | ord(image.read(1)) << 8 | ord(image.read(1))
+            # 4 byte height, Big Endian
             height = ord(image.read(1)) << 24 | ord(image.read(1)) << 16 \
                 | ord(image.read(1)) << 8 | ord(image.read(1))
+            # 1 byte for channels counter (special value for RGB565)
             channels = ord(image.read(1))
             if channels != 200:
                 print(channels)
                 raise Exception("Unsupported QOIF channels")
+            # 1 byte colorspace identifier (unused here)
             colorspace = ord(image.read(1))
             if colorspace != 0:
                 print(colorspace)
                 raise Exception("Unsupported QOIF colorspace")
-            # header end
+            # QOI file header end
 
+            # TODO: implement clipping/cropping?
             display.set_window(x, y, width, height)
+
+            # a linebuffer contains 2 bytes per pixel (16 bit RGB565)
             buf = display.linebuffer[0:2*width]
 
             index = [0] * 64
@@ -234,6 +242,7 @@ class Draw565(object):
             px_b = 0
 
             display.quick_start()
+            # TODO: use 8-byte end marker instead of num_pxs?
             while num_pxs < width*height:
 
                 if run > 0:
@@ -242,21 +251,33 @@ class Draw565(object):
                     next_byte = ord(image.read(1))
                     if next_byte == QOI_OP_RGB:
                         data = image.read(2)
+                        # RGB565 data is split across 2 sequential bytes
+                        #
+                        #        byte 1            byte 2
+                        # | R R R R R G G G | G G G B B B B B |
+                        # '    5     '      6      '    5     '
                         px_r = data[0] >> 3
                         px_g = (data[0] << 3 | data[1] >> 5) & 0x3f
                         px_b = data[1] & 0x1f
                     elif (next_byte & QOI_MASK_2) == QOI_OP_INDEX:
                         px = index[next_byte]
+                        # index contains the RGB565 int value, restore the
+                        # r, g, b values so they can be referred to in the
+                        # next iteration (for RUN or LUMA)
                         px_r = px >> 11
                         px_g = (px >> 5) & 0x3f
                         px_b = px & 0x1f
                     elif (next_byte & QOI_MASK_2) == QOI_OP_DIFF:
+                        # the DIFF operator uses wraparound, thus we wrap
+                        # at 32 for R and B (5 bit) and 64 for G (6 bit)
                         px_r = (px_r + ((next_byte >> 4) & 0x03) - 2) % 32
                         px_g = (px_g + ((next_byte >> 2) & 0x03) - 2) % 64
                         px_b = (px_b + ( next_byte       & 0x03) - 2) % 32
                     elif (next_byte & QOI_MASK_2) == QOI_OP_LUMA:
                         b2 = ord(image.read(1))
                         vg = (next_byte & 0x3f) - 32
+                        # the LUMA operator uses wraparound, thus we wrap
+                        # at 32 for R and B (5 bit) and 64 for G (6 bit)
                         px_r = (px_r + (vg - 8 + ((b2 >> 4) & 0x0f))) % 32
                         px_g = (px_g +  vg                          ) % 64
                         px_b = (px_b + (vg - 8 +  (b2       & 0x0f))) % 32
@@ -268,7 +289,7 @@ class Draw565(object):
                     index[index_pos] = px
 
                 ptr = ptr16(buf)
-                # byte-swap
+                # byte-swap for display
                 ptr[bp] = (px >> 8) + ((px & 0xff) << 8)
                 num_pxs += 1
                 bp += 1
